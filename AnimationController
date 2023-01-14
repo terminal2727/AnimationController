@@ -1,0 +1,185 @@
+using System.Collections.Generic;
+using UnityEngine;
+
+namespace AnimationManagement {
+    public class AnimationController : MonoBehaviour {
+        [field : SerializeField] public AnimationName defaultClip { get; private set; } = AnimationName.Idle;
+        [field : SerializeField] public List<AnimationWrapper> animations { get; private set; }
+
+        private AnimationName _currentAnimationName = AnimationName.Idle;
+        public AnimationName CurrentAnimationName { 
+            get { 
+                return _currentAnimationName; 
+            }
+
+            private set {
+                if (value == _currentAnimationName) return;
+                _currentAnimationName = value;
+                OnAnimationChange?.Invoke();
+            } 
+        }
+
+        public Dictionary<AnimationName, AnimationWrapper> animationLookup { get; private set; } = new Dictionary<AnimationName, AnimationWrapper>();
+
+        private AnimationWrapper currentAnimation;
+        private AnimationWrapper priorAnimation;
+        private Animator animator;
+
+        public delegate void AnimationChange();
+        public event AnimationChange OnAnimationChange;
+
+        public delegate void SnapAnimation();
+        public event SnapAnimation OnSnapEnd;
+
+        private void Awake() {
+            animator = GetComponent<Animator>();
+            foreach (AnimationWrapper anim in animations) animationLookup.Add(anim.name, anim);
+        }
+
+        private void Start() {
+            currentAnimation = animationLookup.GetValueOrDefault(defaultClip);
+            animator.Play(currentAnimation.clip.name);
+            CurrentAnimationName = currentAnimation.name;
+        }
+
+        /// <summary>
+        /// Changes animation to the provided AnimationName. Do not call from SpecializedBehaviour scripts.
+        /// </summary> 
+        public void ChangeAnimation(AnimationName name) {
+            if (currentAnimation.transition == AnimationType.Snap && currentAnimation.transition != AnimationType.Special) return;
+
+            priorAnimation = currentAnimation;
+            AnimationWrapper _animToPlay = animationLookup.GetValueOrDefault(name);
+
+            switch (_animToPlay.transition) {
+                case AnimationType.Crossfade :
+                    animator.CrossFade(_animToPlay.clip.name, _animToPlay.crossFadeTime, 0, _animToPlay.crossFadeOffest);
+                    currentAnimation = _animToPlay;
+                    CurrentAnimationName = currentAnimation.name;
+                break;
+                case AnimationType.Snap :
+                    animator.Play(_animToPlay.clip.name);
+                    currentAnimation = _animToPlay;
+                    CurrentAnimationName = currentAnimation.name;
+                break;
+                case AnimationType.Cinematic :
+                    // Will eventually call a method in a future cinematic script
+                    Debug.Log("Cinematic was called.");
+                break;
+                case AnimationType.Special :
+                    if (_animToPlay.specialBehavior == null || _animToPlay.specialBehavior.GetComponent<SpecializedBehaviour>()) {
+                        Debug.LogWarning($@"AnimationName with the 'Special' transition tag
+                            was passed into ChangeAnimation, but it had no SpecializedBehavior 
+                            script attached to it. No behavior was executed.
+                            
+                            Animation Type : {_animToPlay.name}"
+                        );
+                        return;
+                    }
+
+                    if (_animToPlay.clip != null) {
+                        Debug.LogWarning($@"Any animation you wish to be
+                            played while this script is being executed 
+                            must be called via the OverrideCurrentAnimationSnap()
+                            or the OverrideCurrentAnimationCrossfade()
+                            function. Any other AnimationClip will be ignored."
+                        );
+                    }
+
+                    _animToPlay.specialBehavior.GetComponent<SpecializedBehaviour>().ExecuteSpecialBehavior();
+
+                    if (currentAnimation == priorAnimation) { // So there is an animation playing after the SB is completed.
+                        currentAnimation = animationLookup.GetValueOrDefault(defaultClip);
+                        animator.Play(currentAnimation.clip.name);
+                        CurrentAnimationName = currentAnimation.name;
+                    }
+                break;
+                default :
+                    Debug.Log($@"Somehow, the passed-in transition type 
+                        did not match any of the provided. You probably 
+                        need to add the transition type to the switch 
+                        method in ChangeAnimation().
+
+                        Transition Type: {_animToPlay.transition}."
+                    );
+                break;
+            }
+        }
+
+        /// <summary>
+        /// For internal use only (called by Unity's animation events). Calling this function manually might cause unintentional or weird behaviours.
+        /// </summary> 
+        public void OnSnapAnimationEnd() {
+            OnSnapEnd?.Invoke();
+
+            animator.CrossFade(priorAnimation.clip.name, priorAnimation.crossFadeTime, 0, priorAnimation.crossFadeOffest);
+            
+            currentAnimation = priorAnimation;
+            CurrentAnimationName = currentAnimation.name;
+        }
+
+        // I don't know exactly what would happen if you were to call ChangeAnimation() inside a SpecializedBehaviour script,
+        // but I'd have to assume that it'd either break something, cause a crash, or do something weird.
+        // These bypass those downfalls of cyclical calling by directly playing their respective animations.
+        // As well, it allows SpecializedBehaviour scripts to contain coroutines (I think.)
+
+        /// <summary>
+        /// Only for use in SpecializedBehavior scripts. Call ChangeAnimation() if elsewhere.
+        /// </summary>
+        public void OverrideCurrentAnimationSnap(AnimationName name) {
+            priorAnimation = currentAnimation;
+
+            animator.Play(animationLookup.GetValueOrDefault(name).clip.name);
+
+            currentAnimation = animationLookup.GetValueOrDefault(name);
+            CurrentAnimationName = name;
+        }
+
+        /// <summary>
+        /// Only for use in SpecializedBehavior scripts. Call ChangeAnimation() if elsewhere.
+        /// </summary>
+        public void OverrideCurrentAnimationCrossfade(AnimationName name) {
+            priorAnimation = currentAnimation;
+
+            AnimationWrapper _c = animationLookup.GetValueOrDefault(name);
+            animator.CrossFade(_c.clip.name, _c.crossFadeTime, 0, _c.crossFadeOffest);
+
+            currentAnimation = _c;
+            CurrentAnimationName = name;
+        }
+    }
+
+    [System.Serializable]
+    public class AnimationWrapper {
+        [field : Header("Animation Attributes")]
+        [field : SerializeField] public AnimationClip clip { get; private set; }
+        [field : SerializeField] public AnimationName name { get; private set; }
+        [field : SerializeField] public AnimationType transition { get; private set; }
+        [field : Header("Clip Attributes")]
+        [field : SerializeField] public float crossFadeTime { get; private set; } = 1f;
+        [field : SerializeField] public float crossFadeOffest { get; private set; } = 0f;
+        [field : Header("Special Behavior")]
+        [field : SerializeField] public GameObject specialBehavior { get; private set; }
+    }
+
+    public enum AnimationName {
+        Idle, Walk, Run, AttackOne, AttackTwo, AttackThree, Damage, KO, WinPose
+    }
+
+    public enum AnimationType {
+        Crossfade, Snap, Cinematic, Special
+    }
+
+    /// <summary>
+    /// Ensure that, if an animation is desire, you play said animation using the 
+    /// OverrideCurrentAnimationSnap() and OverrideCurrentAnimationCrossfade() functions.
+    /// Using ChangeAnimation() might cause unintentional or weird behaviours.
+    /// No animation assigned to the AnimationWrapper this script is attached to will be played!
+    /// </summary>
+    public abstract class SpecializedBehaviour : MonoBehaviour {
+        /// <summary>
+        /// For internal use only. Calling this function manually might cause unintentional or weird behaviours.
+        /// </summary>
+        public abstract void ExecuteSpecialBehavior();
+    }
+}
